@@ -31,14 +31,6 @@ from tacker.services import service_base
 LOG = logging.getLogger(__name__)
 
 
-class InfraDriverNotSpecified(exceptions.InvalidInput):
-    message = _('infra driver is not specified')
-
-
-class MGMTDriverNotSpecified(exceptions.InvalidInput):
-    message = _('mgmt driver is not specified')
-
-
 class MultipleMGMTDriversSpecified(exceptions.InvalidInput):
     message = _('More than one MGMT Driver per vnfd is not supported')
 
@@ -153,6 +145,10 @@ class VNFInactive(exceptions.InvalidInput):
     message = _("VNF %(vnf_id)s is not in Active state %(message)s")
 
 
+class MetadataNotMatched(exceptions.InvalidInput):
+    message = _("Metadata for alarm policy is not matched")
+
+
 def _validate_service_type_list(data, valid_values=None):
     if not isinstance(data, list):
         msg = _("invalid data format for service list: '%s'") % data
@@ -214,20 +210,6 @@ RESOURCE_ATTRIBUTE_MAP = {
             'validate': {'type:service_type_list': None},
             'is_visible': True,
             'default': attr.ATTR_NOT_SPECIFIED,
-        },
-        'infra_driver': {
-            'allow_post': True,
-            'allow_put': False,
-            'validate': {'type:string': None},
-            'is_visible': True,
-            'default': "",
-        },
-        'mgmt_driver': {
-            'allow_post': True,
-            'allow_put': False,
-            'validate': {'type:string': None},
-            'is_visible': True,
-            'default': "",
         },
         'attributes': {
             'allow_post': True,

@@ -66,7 +66,7 @@ class TestOpenStack(base.TestCase):
         fake_heat_client = mock.Mock()
         fake_heat_client.return_value = self.heat_client
         self._mock(
-            'tacker.vnfm.infra_drivers.openstack.openstack.HeatClient',
+            'tacker.vnfm.infra_drivers.openstack.heat_client.HeatClient',
             fake_heat_client)
 
     def _mock(self, target, new=mock.DEFAULT):
@@ -162,60 +162,6 @@ class TestOpenStack(base.TestCase):
                 'service_context': [],
                 'id': 'eb84260e-5ff7-4332-b032-50a14d6c1123',
                 'description': u'OpenWRT with services'}
-
-    def _assert_create_result_old_template(self, expected_fields,
-                                           actual_fields, expected_result,
-                                           result):
-        actual_fields["template"] = yaml.safe_load(actual_fields["template"])
-        expected_fields["template"] = \
-            yaml.safe_load(expected_fields["template"])
-        self.assertEqual(expected_fields, actual_fields)
-        self.heat_client.create.assert_called_once_with(expected_fields)
-        self.assertEqual(expected_result, result)
-
-    def test_create(self):
-        vnf_obj = utils.get_dummy_device_obj()
-        expected_result = '4a4c2d44-8a52-4895-9a75-9d1c76c3e738'
-        expected_fields = self._get_expected_fields()
-        result = self.infra_driver.create(plugin=None, context=self.context,
-                                         vnf=vnf_obj,
-                                         auth_attr=utils.get_vim_auth_obj())
-        actual_fields = self.heat_client.create.call_args[0][0]
-        self._assert_create_result_old_template(expected_fields, actual_fields,
-                                   expected_result, result)
-
-    def test_create_user_data_param_attr(self):
-        vnf_obj = utils.get_dummy_device_obj_userdata_attr()
-        expected_result = '4a4c2d44-8a52-4895-9a75-9d1c76c3e738'
-        expected_fields = self._get_expected_fields_user_data()
-        result = self.infra_driver.create(plugin=None, context=self.context,
-                                          vnf=vnf_obj,
-                                          auth_attr=utils.get_vim_auth_obj())
-        actual_fields = self.heat_client.create.call_args[0][0]
-        self._assert_create_result_old_template(expected_fields, actual_fields,
-                                   expected_result, result)
-
-    def test_create_ip_addr_param_attr(self):
-        vnf_obj = utils.get_dummy_device_obj_ipaddr_attr()
-        expected_result = '4a4c2d44-8a52-4895-9a75-9d1c76c3e738'
-        expected_fields = self._get_expected_fields_ipaddr_data()
-        result = self.infra_driver.create(plugin=None, context=self.context,
-                                         vnf=vnf_obj,
-                                         auth_attr=utils.get_vim_auth_obj())
-        actual_fields = self.heat_client.create.call_args[0][0]
-        self._assert_create_result_old_template(expected_fields, actual_fields,
-                                   expected_result, result)
-
-    def test_create_wait(self):
-        vnf_obj = self._get_dummy_tosca_vnf('test_tosca_openwrt.yaml')
-        expected_result = self._get_expected_vnf_wait_obj()
-        vnf_id = '4a4c2d44-8a52-4895-9a75-9d1c76c3e738'
-        self.infra_driver.create_wait(plugin=None,
-                                     context=self.context,
-                                     vnf_dict=vnf_obj,
-                                     vnf_id=vnf_id,
-                                     auth_attr=utils.get_vim_auth_obj())
-        self.assertEqual(expected_result, vnf_obj)
 
     def test_delete(self):
         vnf_id = '4a4c2d44-8a52-4895-9a75-9d1c76c3e738'
@@ -451,3 +397,32 @@ class TestOpenStack(base.TestCase):
             'test_tosca_security_groups.yaml',
             'hot_tosca_security_groups.yaml'
         )
+
+    def test_create_port_with_mac_and_ip(self):
+        self._test_assert_equal_for_tosca_templates(
+            'test_tosca_mac_ip.yaml',
+            'hot_tosca_mac_ip.yaml'
+        )
+
+    def test_create_tosca_alarm_respawn(self):
+        self._test_assert_equal_for_tosca_templates(
+            'tosca_alarm_respawn.yaml',
+            'hot_tosca_alarm_respawn.yaml',
+            is_monitor=False
+        )
+
+    def test_create_tosca_alarm_scale(self):
+        self._test_assert_equal_for_tosca_templates(
+            'tosca_alarm_scale.yaml',
+            'hot_tosca_alarm_scale.yaml',
+            files={'scaling.yaml': 'hot_alarm_scale_custom.yaml'},
+            is_monitor=False
+        )
+
+    def test_create_tosca_with_alarm_monitoring_not_matched(self):
+        self.assertRaises(vnfm.MetadataNotMatched,
+                          self._test_assert_equal_for_tosca_templates,
+                          'tosca_alarm_metadata.yaml',
+                          'hot_tosca_alarm_metadata.yaml',
+                          is_monitor=False
+                          )

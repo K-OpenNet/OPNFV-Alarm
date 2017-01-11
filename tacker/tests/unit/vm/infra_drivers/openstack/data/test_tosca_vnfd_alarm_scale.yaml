@@ -18,6 +18,7 @@ topology_template:
         image: cirros-0.3.4-x86_64-uec
         mgmt_driver: noop
         availability_zone: nova
+        metadata: {metering.vnf: SG1}
 
     CP1:
       type: tosca.nodes.nfv.CP.Tacker
@@ -50,7 +51,7 @@ topology_template:
     - vdu1_cpu_usage_monitoring_policy:
         type: tosca.policies.tacker.Alarming
         triggers:
-            resize_compute:
+            vdu_hcpu_usage_scaling_out:
                 event_type:
                     type: tosca.events.resource.utilization
                     implementation: ceilometer
@@ -62,6 +63,5 @@ topology_template:
                     evaluations: 1
                     method: avg
                     comparison_operator: gt
-                action:
-                  resize_compute:
-                    action_name: SP1
+                metadata: SG1
+                actions: [SP1]

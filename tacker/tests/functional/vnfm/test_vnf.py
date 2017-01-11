@@ -26,7 +26,7 @@ VNF_CIRROS_CREATE_TIMEOUT = 120
 class VnfTestCreate(base.BaseTackerTest):
     def _test_create_delete_vnf(self, vnf_name, vnfd_name, vim_id=None):
         data = dict()
-        data['tosca'] = read_file('sample_cirros_vnf_no_monitoring.yaml')
+        data['tosca'] = read_file('sample-tosca-vnfd-no-monitor.yaml')
         toscal = data['tosca']
         tosca_arg = {'vnfd': {'name': vnfd_name,
                      'attributes': {'vnfd': toscal}}}
@@ -59,8 +59,8 @@ class VnfTestCreate(base.BaseTackerTest):
         self.assertIn('type', vnf_details)
 
         self.verify_vnf_crud_events(
-            vnf_id, evt_constants.RES_EVT_CREATE, evt_constants.PENDING_CREATE,
-            vnf_instance['vnf'][evt_constants.RES_EVT_CREATED_FLD])
+            vnf_id, evt_constants.RES_EVT_CREATE,
+            evt_constants.PENDING_CREATE, cnt=2)
         self.verify_vnf_crud_events(
             vnf_id, evt_constants.RES_EVT_CREATE, evt_constants.ACTIVE)
 

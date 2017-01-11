@@ -17,11 +17,11 @@
 import os
 import six
 
+from keystoneauth1 import exceptions
 from keystoneauth1 import identity
+from keystoneauth1.identity import v2
+from keystoneauth1.identity import v3
 from keystoneauth1 import session
-from keystoneclient.auth.identity import v2
-from keystoneclient.auth.identity import v3
-from keystoneclient import exceptions
 from neutronclient.common import exceptions as nc_exceptions
 from neutronclient.v2_0 import client as neutron_client
 from oslo_config import cfg
@@ -176,7 +176,7 @@ class OpenStack_Driver(abstract_vim_driver.VimAbstractDriver,
         try:
             regions_list = self._find_regions(ks_client)
         except (exceptions.Unauthorized, exceptions.BadRequest) as e:
-            LOG.warn(_("Authorization failed for user"))
+            LOG.warning(_("Authorization failed for user"))
             raise nfvo.VimUnauthorizedException(message=e.message)
         vim_obj['placement_attr'] = {'regions': regions_list}
         return vim_obj

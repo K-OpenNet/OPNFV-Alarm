@@ -62,7 +62,7 @@ FLAVOR_EXTRA_SPECS_LIST = ('cpu_allocation',
 
 delpropmap = {TACKERVDU: ('mgmt_driver', 'config', 'service_type',
                           'placement_policy', 'monitoring_policy',
-                          'failure_policy'),
+                          'metadata', 'failure_policy'),
               TACKERCP: ('management',)}
 
 convert_prop = {TACKERCP: {'anti_spoofing_protection':
@@ -70,8 +70,8 @@ convert_prop = {TACKERCP: {'anti_spoofing_protection':
                            'type':
                            'binding:vnic_type'}}
 
-convert_prop_values = {TACKERCP: {'sriov': 'direct',
-                                  'vnic': 'normal'}}
+convert_prop_values = {TACKERCP: {'type': {'sriov': 'direct',
+                                           'vnic': 'normal'}}}
 
 deletenodes = (MONITORING, FAILURE, PLACEMENT)
 
@@ -115,6 +115,19 @@ def get_vdu_monitoring(template):
                 monitoring_dict['vdus'][nt.name][mon_policy['name']] = \
                     mon_policy
     return monitoring_dict
+
+
+@log.log
+def get_vdu_metadata(template):
+    metadata = dict()
+    metadata.setdefault('vdus', {})
+    for nt in template.nodetemplates:
+        if nt.type_definition.is_derived_from(TACKERVDU):
+            metadata_dict = nt.get_property_value('metadata') or None
+            if metadata_dict:
+                metadata['vdus'][nt.name] = {}
+                metadata['vdus'][nt.name].update(metadata_dict)
+    return metadata
 
 
 @log.log
@@ -177,8 +190,8 @@ def convert_unsupported_res_prop(heat_dict, unsupported_res_prop):
 
 
 @log.log
-def post_process_heat_template(heat_tpl, mgmt_ports, res_tpl,
-                               unsupported_res_prop=None):
+def post_process_heat_template(heat_tpl, mgmt_ports, metadata,
+                               res_tpl, unsupported_res_prop=None):
     #
     # TODO(bobh) - remove when heat-translator can support literal strings.
     #
@@ -200,6 +213,11 @@ def post_process_heat_template(heat_tpl, mgmt_ports, res_tpl,
         else:
             heat_dict['outputs'] = output
         LOG.debug(_('Added output for %s'), outputname)
+    if metadata:
+        for vdu_name, metadata_dict in metadata['vdus'].items():
+            heat_dict['resources'][vdu_name]['properties']['metadata'] =\
+                metadata_dict
+
     add_resources_tpl(heat_dict, res_tpl)
     if unsupported_res_prop:
         convert_unsupported_res_prop(heat_dict, unsupported_res_prop)
@@ -221,6 +239,16 @@ def post_process_template(template):
                     if prop == p.name:
                         nt.get_properties_objects().remove(p)
 
+        # change the property value first before the property key
+        if nt.type in convert_prop_values:
+            for prop in convert_prop_values[nt.type].keys():
+                for p in nt.get_properties_objects():
+                    if (prop == p.name and
+                            p.value in
+                            convert_prop_values[nt.type][prop].keys()):
+                        v = convert_prop_values[nt.type][prop][p.value]
+                        p.value = v
+
         if nt.type in convert_prop:
             for prop in convert_prop[nt.type].keys():
                 for p in nt.get_properties_objects():
@@ -231,13 +259,6 @@ def post_process_template(template):
                             convert_prop[nt.type][prop], v, schema_dict)
                         nt.get_properties_objects().append(newprop)
                         nt.get_properties_objects().remove(p)
-
-        if nt.type in convert_prop_values:
-            for key in convert_prop_values[nt.type].keys():
-                for p in nt.get_properties_objects():
-                    if key == p.value:
-                        v = convert_prop_values[nt.type][p.value]
-                        p.value = v
 
 
 @log.log
