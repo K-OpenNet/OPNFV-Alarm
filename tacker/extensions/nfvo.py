@@ -59,18 +59,23 @@ class VimKeyNotFoundException(exceptions.TackerException):
     message = _("Unable to find key file for VIM %(vim_id)s")
 
 
-class VimDuplicateUrlException(exceptions.TackerException):
-    message = _("VIM with specified auth URL already exists. Cannot register "
-                "duplicate VIM")
-
-
 class VimUnsupportedResourceTypeException(exceptions.TackerException):
     message = _("Resource type %(type) is unsupported by VIM")
 
 
 class VimGetResourceException(exceptions.TackerException):
     message = _("Error while trying to issue %(cmd)s to find resource type "
-                "%(type)s")
+                "%(type)s by resource name %(name)s")
+
+
+class VimGetResourceNameNotUnique(exceptions.TackerException):
+    message = _("Getting resource id from VIM with resource name %(name)s "
+                "by %(cmd)s returns more than one")
+
+
+class VimGetResourceNotFoundException(exceptions.TackerException):
+    message = _("Getting resource id from VIM with resource name %(name)s "
+                "by %(cmd)s returns nothing")
 
 
 class VimFromVnfNotFoundException(exceptions.NotFound):
@@ -208,6 +213,13 @@ class ClassifierInUse(exceptions.InUse):
 class ClassifierNotFoundException(exceptions.NotFound):
     message = _('Classifier %(classifier_id)s could not be found')
 
+
+class NSDInUse(exceptions.InUse):
+    message = _('NSD %(nsd_id)s is still in use')
+
+
+class NSInUse(exceptions.InUse):
+    message = _('NS %(ns_id)s is still in use')
 
 RESOURCE_ATTRIBUTE_MAP = {
 
@@ -373,6 +385,14 @@ RESOURCE_ATTRIBUTE_MAP = {
             'default': '',
         },
         'vnf_mapping': {
+            'allow_post': True,
+            'allow_put': True,
+            'convert_to': attr.convert_none_to_empty_dict,
+            'validate': {'type:dict_or_nodata': None},
+            'is_visible': True,
+            'default': None,
+        },
+        'attributes': {
             'allow_post': True,
             'allow_put': True,
             'convert_to': attr.convert_none_to_empty_dict,
@@ -549,7 +569,152 @@ RESOURCE_ATTRIBUTE_MAP = {
             'allow_put': False,
             'is_visible': True,
         },
-    }
+    },
+
+    'nsds': {
+        'id': {
+            'allow_post': False,
+            'allow_put': False,
+            'validate': {'type:uuid': None},
+            'is_visible': True,
+            'primary_key': True,
+        },
+        'tenant_id': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:string': None},
+            'required_by_policy': True,
+            'is_visible': True,
+        },
+        'name': {
+            'allow_post': True,
+            'allow_put': True,
+            'validate': {'type:string': None},
+            'is_visible': True,
+        },
+        'description': {
+            'allow_post': True,
+            'allow_put': True,
+            'validate': {'type:string': None},
+            'is_visible': True,
+            'default': '',
+        },
+        'created_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'updated_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'attributes': {
+            'allow_post': True,
+            'allow_put': False,
+            'convert_to': attr.convert_none_to_empty_dict,
+            'validate': {'type:dict_or_nodata': None},
+            'is_visible': True,
+            'default': None,
+        },
+
+    },
+
+    'nss': {
+        'id': {
+            'allow_post': False,
+            'allow_put': False,
+            'validate': {'type:uuid': None},
+            'is_visible': True,
+            'primary_key': True,
+        },
+        'tenant_id': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:string': None},
+            'required_by_policy': True,
+            'is_visible': True,
+        },
+        'name': {
+            'allow_post': True,
+            'allow_put': True,
+            'validate': {'type:string': None},
+            'is_visible': True,
+        },
+        'description': {
+            'allow_post': True,
+            'allow_put': True,
+            'validate': {'type:string': None},
+            'is_visible': True,
+            'default': '',
+        },
+        'created_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'updated_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'vnf_ids': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:string': None},
+            'is_visible': True,
+            'default': '',
+        },
+        'nsd_id': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:uuid': None},
+            'is_visible': True,
+        },
+        'vim_id': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:string': None},
+            'is_visible': True,
+            'default': '',
+        },
+        'status': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'error_reason': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'created_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'updated_at': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+        },
+        'attributes': {
+            'allow_post': True,
+            'allow_put': False,
+            'convert_to': attr.convert_none_to_empty_dict,
+            'validate': {'type:dict_or_nodata': None},
+            'is_visible': True,
+            'default': None,
+        },
+        'mgmt_urls': {
+            'allow_post': False,
+            'allow_put': False,
+            'convert_to': attr.convert_none_to_empty_dict,
+            'validate': {'type:dict_or_nodata': None},
+            'is_visible': True,
+        },
+    },
+
 }
 
 

@@ -16,12 +16,14 @@
 
 import os
 import six
+import yaml
 
 from keystoneauth1 import exceptions
 from keystoneauth1 import identity
 from keystoneauth1.identity import v2
 from keystoneauth1.identity import v3
 from keystoneauth1 import session
+from mistralclient.api import client as mistral_client
 from neutronclient.common import exceptions as nc_exceptions
 from neutronclient.v2_0 import client as neutron_client
 from oslo_config import cfg
@@ -33,6 +35,7 @@ from tacker.common import log
 from tacker.extensions import nfvo
 from tacker.nfvo.drivers.vim import abstract_vim_driver
 from tacker.nfvo.drivers.vnffg import abstract_vnffg_driver
+from tacker.nfvo.drivers.workflow import workflow_generator
 from tacker.vnfm import keystone
 
 
@@ -55,7 +58,9 @@ cfg.CONF.register_opts(OPTS, 'vim_keys')
 cfg.CONF.register_opts(OPENSTACK_OPTS, 'vim_monitor')
 
 _VALID_RESOURCE_TYPES = {'network': {'client': neutron_client.Client,
-                                     'cmd': 'list_'
+                                     'cmd': 'list_networks',
+                                     'vim_res_name': 'networks',
+                                     'filter_attr': 'name'
                                      }
                          }
 
@@ -262,21 +267,34 @@ class OpenStack_Driver(abstract_vim_driver.VimAbstractDriver,
         :return: ID of resource
         """
         if resource_type in _VALID_RESOURCE_TYPES.keys():
-            client_type = _VALID_RESOURCE_TYPES[resource_type]['client']
-            cmd_prefix = _VALID_RESOURCE_TYPES[resource_type]['cmd']
+            res_cmd_map = _VALID_RESOURCE_TYPES[resource_type]
+            client_type = res_cmd_map['client']
+            cmd = res_cmd_map['cmd']
+            filter_attr = res_cmd_map.get('filter_attr')
+            vim_res_name = res_cmd_map['vim_res_name']
         else:
             raise nfvo.VimUnsupportedResourceTypeException(type=resource_type)
 
         client = self._get_client(vim_obj, client_type)
-        cmd = str(cmd_prefix) + str(resource_name)
+        cmd_args = {}
+        if filter_attr:
+            cmd_args[filter_attr] = resource_name
+
         try:
-            resources = getattr(client, "%s" % cmd)()
+            resources = getattr(client, "%s" % cmd)(**cmd_args)[vim_res_name]
             LOG.debug(_('resources output %s'), resources)
-            for resource in resources[resource_type]:
-                if resource['name'] == resource_name:
-                    return resource['id']
         except Exception:
-            raise nfvo.VimGetResourceException(cmd=cmd, type=resource_type)
+            raise nfvo.VimGetResourceException(
+                cmd=cmd, name=resource_name, type=resource_type)
+
+        if len(resources) > 1:
+            raise nfvo.VimGetResourceNameNotUnique(
+                cmd=cmd, name=resource_name)
+        elif len(resources) < 1:
+            raise nfvo.VimGetResourceNotFoundException(
+                cmd=cmd, name=resource_name)
+
+        return resources[0]['id']
 
     @log.log
     def _get_client(self, vim_obj, client_type):
@@ -453,6 +471,57 @@ class OpenStack_Driver(abstract_vim_driver.VimAbstractDriver,
         neutronclient_ = NeutronClient(auth_attr)
         neutronclient_.flow_classifier_delete(fc_id)
 
+    def get_mistral_client(self, auth_dict):
+        if not auth_dict:
+            LOG.warning(_("auth dict required to instantiate mistral client"))
+            raise EnvironmentError('auth dict required for'
+                                   ' mistral workflow driver')
+        return MistralClient(
+            keystone.Keystone().initialize_client('2', **auth_dict),
+            auth_dict['token']).get_client()
+
+    def prepare_and_create_workflow(self, resource, action,
+                                    kwargs, auth_dict=None):
+        mistral_client = self.get_mistral_client(auth_dict)
+        wg = workflow_generator.WorkflowGenerator(resource, action)
+        wg.task(**kwargs)
+        definition_yaml = yaml.safe_dump(wg.definition)
+        workflow = mistral_client.workflows.create(definition_yaml)
+        return {'id': workflow[0].id, 'input': wg.get_input_dict()}
+
+    def execute_workflow(self, workflow, auth_dict=None):
+        return self.get_mistral_client(auth_dict)\
+            .executions.create(
+                workflow_identifier=workflow['id'],
+                workflow_input=workflow['input'],
+                wf_params={})
+
+    def get_execution(self, execution_id, auth_dict=None):
+        return self.get_mistral_client(auth_dict)\
+            .executions.get(execution_id)
+
+    def delete_execution(self, execution_id, auth_dict=None):
+        return self.get_mistral_client(auth_dict).executions\
+            .delete(execution_id)
+
+    def delete_workflow(self, workflow_id, auth_dict=None):
+        return self.get_mistral_client(auth_dict)\
+            .workflows.delete(workflow_id)
+
+
+class MistralClient(object):
+    """Mistral Client class for NSD"""
+
+    def __init__(self, keystone, auth_token):
+        endpoint = keystone.session.get_endpoint(
+            service_type='workflowv2', region_name=None)
+
+        self.client = mistral_client.client(auth_token=auth_token,
+            mistral_url=endpoint)
+
+    def get_client(self):
+        return self.client
+
 
 class NeutronClient(object):
     """Neutron Client class for networking-sfc driver"""
@@ -478,14 +547,14 @@ class NeutronClient(object):
         try:
             self.client.delete_flow_classifier(fc_id)
         except nc_exceptions.NotFound:
-            LOG.warning(_("fc %s not found") % fc_id)
+            LOG.warning(_("fc %s not found"), fc_id)
             raise ValueError('fc %s not found' % fc_id)
 
     def port_pair_create(self, port_pair_dict):
         try:
             pp = self.client.create_port_pair({'port_pair': port_pair_dict})
         except nc_exceptions.BadRequest as e:
-            LOG.error(_("create port pair returns %s") % e)
+            LOG.error(_("create port pair returns %s"), e)
             raise ValueError(str(e))
 
         if pp and len(pp):
@@ -497,7 +566,7 @@ class NeutronClient(object):
         try:
             self.client.delete_port_pair(port_pair_id)
         except nc_exceptions.NotFound:
-            LOG.warning(_('port pair %s not found') % port_pair_id)
+            LOG.warning(_('port pair %s not found'), port_pair_id)
             raise ValueError('port pair %s not found' % port_pair_id)
 
     def port_pair_group_create(self, ppg_dict):
@@ -505,7 +574,7 @@ class NeutronClient(object):
             ppg = self.client.create_port_pair_group(
                 {'port_pair_group': ppg_dict})
         except nc_exceptions.BadRequest as e:
-            LOG.warning(_('create port pair group returns %s') % e)
+            LOG.warning(_('create port pair group returns %s'), e)
             raise ValueError(str(e))
 
         if ppg and len(ppg):
@@ -517,7 +586,7 @@ class NeutronClient(object):
         try:
             self.client.delete_port_pair_group(ppg_id)
         except nc_exceptions.NotFound:
-            LOG.warning(_('port pair group %s not found') % ppg_id)
+            LOG.warning(_('port pair group %s not found'), ppg_id)
             raise ValueError('port pair group %s not found' % ppg_id)
 
     def port_chain_create(self, port_chain_dict):
@@ -525,7 +594,7 @@ class NeutronClient(object):
             pc = self.client.create_port_chain(
                 {'port_chain': port_chain_dict})
         except nc_exceptions.BadRequest as e:
-            LOG.warning(_('create port chain returns %s') % e)
+            LOG.warning(_('create port chain returns %s'), e)
             raise ValueError(str(e))
 
         if pc and len(pc):
@@ -550,5 +619,5 @@ class NeutronClient(object):
                                     pp_id = port_pairs[j]
                                     self.client.delete_port_pair(pp_id)
         except nc_exceptions.NotFound:
-            LOG.warning(_('port chain %s not found') % port_chain_id)
+            LOG.warning(_('port chain %s not found'), port_chain_id)
             raise ValueError('port chain %s not found' % port_chain_id)

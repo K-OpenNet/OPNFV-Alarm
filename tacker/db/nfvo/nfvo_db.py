@@ -60,7 +60,7 @@ class Vim(model_base.BASE,
 class VimAuth(model_base.BASE, models_v1.HasId):
     vim_id = sa.Column(types.Uuid, sa.ForeignKey('vims.id'),
                        nullable=False)
-    password = sa.Column(sa.String(128), nullable=False)
+    password = sa.Column(sa.String(255), nullable=False)
     auth_url = sa.Column(sa.String(255), nullable=False)
     vim_project = sa.Column(types.Json, nullable=False)
     auth_cred = sa.Column(types.Json, nullable=False)
@@ -102,44 +102,28 @@ class NfvoPluginDb(nfvo.NFVOPluginBase, db_base.CommonDbMixin):
             else:
                 raise
 
-    def _does_already_exist(self, context, vim):
-        try:
-            query = self._model_query(context, VimAuth)
-            for v_auth in query.filter(VimAuth.auth_url == vim.get('auth_url')
-                                       ).all():
-                vim = self._get_by_id(context, Vim, v_auth.get('vim_id'))
-                if vim.get('deleted_at') is None:
-                    return True
-        except orm_exc.NoResultFound:
-            pass
-
-        return False
-
     def create_vim(self, context, vim):
         self._validate_default_vim(context, vim)
         vim_cred = vim['auth_cred']
-        if not self._does_already_exist(context, vim):
-            with context.session.begin(subtransactions=True):
-                vim_db = Vim(
-                    id=vim.get('id'),
-                    type=vim.get('type'),
-                    tenant_id=vim.get('tenant_id'),
-                    name=vim.get('name'),
-                    description=vim.get('description'),
-                    placement_attr=vim.get('placement_attr'),
-                    is_default=vim.get('is_default'),
-                    status=vim.get('status'))
-                context.session.add(vim_db)
-                vim_auth_db = VimAuth(
-                    id=str(uuid.uuid4()),
-                    vim_id=vim.get('id'),
-                    password=vim_cred.pop('password'),
-                    vim_project=vim.get('vim_project'),
-                    auth_url=vim.get('auth_url'),
-                    auth_cred=vim_cred)
-                context.session.add(vim_auth_db)
-        else:
-                raise nfvo.VimDuplicateUrlException()
+        with context.session.begin(subtransactions=True):
+            vim_db = Vim(
+                id=vim.get('id'),
+                type=vim.get('type'),
+                tenant_id=vim.get('tenant_id'),
+                name=vim.get('name'),
+                description=vim.get('description'),
+                placement_attr=vim.get('placement_attr'),
+                is_default=vim.get('is_default'),
+                status=vim.get('status'))
+            context.session.add(vim_db)
+            vim_auth_db = VimAuth(
+                id=str(uuid.uuid4()),
+                vim_id=vim.get('id'),
+                password=vim_cred.pop('password'),
+                vim_project=vim.get('vim_project'),
+                auth_url=vim.get('auth_url'),
+                auth_cred=vim_cred)
+            context.session.add(vim_auth_db)
         vim_dict = self._make_vim_dict(vim_db)
         self._cos_db_plg.create_event(
             context, res_id=vim_dict['id'],

@@ -39,7 +39,7 @@ OPTS = [
                help=_("Number of attempts to retry for stack"
                       " creation/deletion")),
     cfg.IntOpt('stack_retry_wait',
-               default=5,
+               default=10,
                help=_("Wait time (in seconds) between consecutive stack"
                       " create/delete retries")),
 ]
@@ -200,13 +200,13 @@ class OpenStack(abstract_driver.DeviceAbstractDriver,
         LOG.debug('yaml orig %(orig)s update %(update)s',
                   {'orig': config_yaml, 'update': update_yaml})
 
-        # If config_yaml is None, yaml.load() will raise Attribute Error.
+        # If config_yaml is None, yaml.safe_load() will raise Attribute Error.
         # So set config_yaml to {}, if it is None.
         if not config_yaml:
             config_dict = {}
         else:
-            config_dict = yaml.load(config_yaml) or {}
-        update_dict = yaml.load(update_yaml)
+            config_dict = yaml.safe_load(config_yaml) or {}
+        update_dict = yaml.safe_load(update_yaml)
         if not update_dict:
             return
 
@@ -225,7 +225,7 @@ class OpenStack(abstract_driver.DeviceAbstractDriver,
         deep_update(config_dict, update_dict)
         LOG.debug('dict new %(new)s update %(update)s',
                   {'new': config_dict, 'update': update_dict})
-        new_yaml = yaml.dump(config_dict)
+        new_yaml = yaml.safe_dump(config_dict)
         vnf_dict.setdefault('attributes', {})['config'] = new_yaml
 
     @log.log
@@ -280,7 +280,7 @@ class OpenStack(abstract_driver.DeviceAbstractDriver,
                             stack_status=status)
             LOG.warning(error_reason)
             raise vnfm.VNFCreateWaitFailed(vnf_id=vnf_id,
-                                           eason=error_reason)
+                                           reason=error_reason)
 
     @classmethod
     def _find_mgmt_ips_from_groups(cls, heat_client, instance_id, group_names):

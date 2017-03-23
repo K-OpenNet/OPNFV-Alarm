@@ -21,8 +21,11 @@ from translator.hot import tosca_translator
 import yaml
 
 from tacker.common import log
+from tacker.extensions import common_services as cs
 from tacker.extensions import vnfm
 from tacker.vnfm.tosca import utils as toscautils
+
+from collections import OrderedDict
 
 
 LOG = logging.getLogger(__name__)
@@ -135,12 +138,12 @@ class TOSCAToHOT(object):
         if is_scaling_needed:
             if is_enabled_alarm:
                 main_dict['resources'].update(alarm_resource)
-            main_yaml = yaml.dump(main_dict)
+            main_yaml = yaml.safe_dump(main_dict)
             self.fields['template'] = main_yaml
             self.fields['files'] = {'scaling.yaml': self.heat_template_yaml}
             vnf['attributes']['heat_template'] = main_yaml
             # TODO(kanagaraj-manickam) when multiple groups are
-            # supported, make this scaling atribute as
+            # supported, make this scaling attribute as
             # scaling name vs scaling template map and remove
             # scaling_group_names
             vnf['attributes']['scaling.yaml'] = self.heat_template_yaml
@@ -165,13 +168,13 @@ class TOSCAToHOT(object):
                         self._update_params(value, paramvalues[key], False)
                     else:
                         LOG.debug('Key missing Value: %s', key)
-                        raise vnfm.InputValuesMissing(key=key)
+                        raise cs.InputValuesMissing(key=key)
                 elif 'get_input' in value:
                     if value['get_input'] in paramvalues:
                         original[key] = paramvalues[value['get_input']]
                     else:
                         LOG.debug('Key missing Value: %s', key)
-                        raise vnfm.InputValuesMissing(key=key)
+                        raise cs.InputValuesMissing(key=key)
                 else:
                     self._update_params(value, paramvalues, True)
 
@@ -180,7 +183,7 @@ class TOSCAToHOT(object):
         param_vattrs_yaml = dev_attrs.pop('param_values', None)
         if param_vattrs_yaml:
             try:
-                param_vattrs_dict = yaml.load(param_vattrs_yaml)
+                param_vattrs_dict = yaml.safe_load(param_vattrs_yaml)
                 LOG.debug('param_vattrs_yaml', param_vattrs_dict)
             except Exception as e:
                 LOG.debug("Not Well Formed: %s", str(e))
@@ -189,7 +192,7 @@ class TOSCAToHOT(object):
             else:
                 self._update_params(vnfd_dict, param_vattrs_dict)
         else:
-            raise vnfm.ParamYAMLInputMissing()
+            raise cs.ParamYAMLInputMissing()
 
     @log.log
     def _process_vdu_network_interfaces(self, vdu_id, vdu_dict, properties,
@@ -283,12 +286,15 @@ class TOSCAToHOT(object):
         parsed_params = {}
         if 'param_values' in dev_attrs and dev_attrs['param_values'] != "":
             try:
-                parsed_params = yaml.load(dev_attrs['param_values'])
+                parsed_params = yaml.safe_load(dev_attrs['param_values'])
             except Exception as e:
                 LOG.debug("Params not Well Formed: %s", str(e))
                 raise vnfm.ParamYAMLNotWellFormed(error_msg_details=str(e))
 
         toscautils.updateimports(vnfd_dict)
+        if 'substitution_mappings' in str(vnfd_dict):
+            toscautils.check_for_substitution_mappings(vnfd_dict,
+                parsed_params)
 
         try:
             tosca = tosca_template.ToscaTemplate(parsed_params=parsed_params,
@@ -324,7 +330,7 @@ class TOSCAToHOT(object):
     def _generate_hot_scaling(self, vnfd_dict,
                               scale_resource_type="OS::Nova::Server"):
         # Initialize the template
-        template_dict = yaml.load(HEAT_TEMPLATE_BASE)
+        template_dict = yaml.safe_load(HEAT_TEMPLATE_BASE)
         template_dict['description'] = 'Tacker scaling template'
 
         parameters = {}
@@ -364,7 +370,7 @@ class TOSCAToHOT(object):
         properties['desired_capacity'] = policy_prp['default_instances']
         properties['cooldown'] = policy_prp['cooldown']
         properties['resource'] = {}
-        # TODO(kanagaraj-manickam) all VDU memebers are considered as 1
+        # TODO(kanagaraj-manickam) all VDU members are considered as 1
         # group now and make it to form the groups based on the VDU
         # list mentioned in the policy's targets
         # scale_resource_type is custome type mapped the HOT template
@@ -426,6 +432,32 @@ class TOSCAToHOT(object):
         return resources, scaling_group_names
 
     @log.log
+    def represent_odict(self, dump, tag, mapping, flow_style=None):
+        value = []
+        node = yaml.MappingNode(tag, value, flow_style=flow_style)
+        if dump.alias_key is not None:
+            dump.represented_objects[dump.alias_key] = node
+        best_style = True
+        if hasattr(mapping, 'items'):
+            mapping = mapping.items()
+        for item_key, item_value in mapping:
+            node_key = dump.represent_data(item_key)
+            node_value = dump.represent_data(item_value)
+            if not (isinstance(node_key, yaml.ScalarNode)
+                    and not node_key.style):
+                best_style = False
+            if not (isinstance(node_value, yaml.ScalarNode)
+                    and not node_value.style):
+                best_style = False
+            value.append((node_key, node_value))
+        if flow_style is None:
+            if dump.default_flow_style is not None:
+                node.flow_style = dump.default_flow_style
+            else:
+                node.flow_style = best_style
+        return node
+
+    @log.log
     def _generate_hot_alarm_resource(self, topology_tpl_dict):
         alarm_resource = dict()
         heat_tpl = self.heat_template_yaml
@@ -441,54 +473,136 @@ class TOSCAToHOT(object):
                     is_enabled_alarm = True
                     triggers = policy_tpl_dict['triggers']
                     for trigger_name, trigger_dict in triggers.items():
-                        alarm_resource[trigger_name] =\
-                            self._convert_to_heat_monitoring_resource({
-                                trigger_name: trigger_dict}, self.vnf)
+                        alarm_resource.update(
+                            self._convert_to_heat_monitoring_resources(
+                                {trigger_name: trigger_dict}, self.vnf))
             heat_dict['resources'].update(alarm_resource)
 
-        heat_tpl_yaml = yaml.dump(heat_dict)
+        yaml.SafeDumper.add_representer(OrderedDict,
+        lambda dumper, value: self.represent_odict(dumper,
+                                              u'tag:yaml.org,2002:map', value))
+        heat_tpl_yaml = yaml.safe_dump(heat_dict)
         return (is_enabled_alarm,
                 alarm_resource,
                 heat_tpl_yaml
                 )
 
-    def _convert_to_heat_monitoring_resource(self, mon_policy, vnf):
-        mon_policy_hot = {'type': 'OS::Aodh::Alarm'}
-        mon_policy_hot['properties'] = \
-            self._convert_to_heat_monitoring_prop(mon_policy, vnf)
-        return mon_policy_hot
-
-    def _convert_to_heat_monitoring_prop(self, mon_policy, vnf):
-        metadata = self.metadata
+    def _convert_to_heat_monitoring_resources(self, mon_policy, vnf):
+        monitoring_resources = dict()
         trigger_name, trigger_dict = list(mon_policy.items())[0]
-        tpl_condition = trigger_dict['condition']
-        properties = dict()
+        monitoring_driver = trigger_dict['event_type'].get('implementation')
+        if monitoring_driver.lower() == 'ceilometer':
+            monitoring_resources = \
+                self._convert_to_heat_ceilometer_resources(trigger_name,
+                                                           trigger_dict, vnf)
+        if monitoring_driver.lower() == 'monasca':
+            monitoring_resources = \
+                self._convert_to_heat_monasca_resources(trigger_name,
+                                                        trigger_dict, vnf)
+        return monitoring_resources
+
+    def _convert_to_heat_ceilometer_resources(self, trigger_name,
+                                              trigger_dict, vnf):
+        monitoring_resources = dict()
+        ceilometer_resources = dict()
+        ceilometer_resources['type'] = 'OS::Aodh::Alarm'
+        metadata = self.metadata
+
+        def _convert_to_heat_ceilometer_prop():
+            properties = dict()
+            tpl_condition = trigger_dict['condition']
+            if not (trigger_dict.get('metadata') and metadata):
+                raise vnfm.MetadataNotMatched()
+            matching_metadata_dict = dict()
+            properties['meter_name'] = trigger_dict['metrics']
+            is_matched = False
+            for vdu_name, metadata_dict in metadata['vdus'].items():
+                if trigger_dict['metadata'] ==\
+                        metadata_dict.get('metering.vnf'):
+                    is_matched = True
+            if not is_matched:
+                raise vnfm.MetadataNotMatched()
+            matching_metadata_dict['metadata.user_metadata.vnf'] =\
+                trigger_dict['metadata']
+            properties['matching_metadata'] = \
+                matching_metadata_dict
+            properties['comparison_operator'] = \
+                tpl_condition['comparison_operator']
+            properties['period'] = tpl_condition['period']
+            properties['evaluation_periods'] = tpl_condition['evaluations']
+            properties['statistic'] = tpl_condition['method']
+            properties['description'] = tpl_condition['constraint']
+            properties['threshold'] = tpl_condition['threshold']
+            # alarm url process here
+            alarm_url = vnf['attributes'].get(trigger_name)
+            if alarm_url:
+                alarm_url = str(alarm_url)
+                LOG.debug('Alarm url in heat-ceilometer %s', alarm_url)
+                properties['alarm_actions'] = [alarm_url]
+            return properties
+        ceilometer_resources['properties'] = _convert_to_heat_ceilometer_prop()
+        monitoring_resources[trigger_name] = ceilometer_resources
+        return monitoring_resources
+
+    def _convert_to_heat_monasca_resources(self, trigger_name,
+                                           trigger_dict, vnf):
+        monitoring_resources = dict()
+        mnc_alarm_resources = dict()
+        mnc_alarm_resources['type'] = 'OS::Monasca::AlarmDefinition'
+        metadata = self.metadata
         if not (trigger_dict.get('metadata') and metadata):
             raise vnfm.MetadataNotMatched()
-        matching_metadata_dict = dict()
-        properties['meter_name'] = trigger_dict['metrics']
-        is_matched = False
-        for vdu_name, metadata_dict in metadata['vdus'].items():
-            if trigger_dict['metadata'] ==\
-                    metadata_dict['metering.vnf']:
-                is_matched = True
-        if not is_matched:
-            raise vnfm.MetadataNotMatched()
-        matching_metadata_dict['metadata.user_metadata.vnf'] =\
-            trigger_dict['metadata']
-        properties['matching_metadata'] = \
-            matching_metadata_dict
-        properties['comparison_operator'] = \
-            tpl_condition['comparison_operator']
-        properties['period'] = tpl_condition['period']
-        properties['evaluation_periods'] = tpl_condition['evaluations']
-        properties['statistic'] = tpl_condition['method']
-        properties['description'] = tpl_condition['constraint']
-        properties['threshold'] = tpl_condition['threshold']
+
+        def _convert_to_heat_monasca_prop():
+            properties = dict()
+            tpl_condition = trigger_dict['condition']
+            match_cmp = {'gt': '>', 'lt': '<'}
+            ntf_name_dict = {'gt': 'up_notification',
+                             'lt': 'down_notification'}
+            if not (trigger_dict.get('metadata') and metadata):
+                raise vnfm.MetadataNotMatched()
+            properties['name'] = trigger_dict['metrics']
+            properties['description'] = tpl_condition.get('constraint')
+            properties['severity'] = 'high'\
+                if tpl_condition.get('comparison_operator') == 'gt' else 'low'
+            properties['expression'] = dict()
+            str_replace_dict = dict()
+            param_dict = dict()
+            param_dict['scale_group_id'] = trigger_dict['metadata']
+            str_replace_dict['params'] = param_dict
+            monasca_method = tpl_condition['method']
+            sg_id = 'scale_group_id'
+            monasca_cmp = match_cmp[tpl_condition['comparison_operator']]
+            monasca_eval = tpl_condition['evaluations']
+            monasca_threshold = tpl_condition['threshold']
+            # TODO(tung doan) enhance to support other metrics
+            str_replace_dict['template'] =\
+                '%(method)s(vm.cpu.utilization_perc{scale_group=%(sg_id)s}) %(cmp)s %(thres)s times %(eval)s'\
+                % {'method': monasca_method, 'sg_id': sg_id,
+                   'thres': monasca_threshold, 'cmp': monasca_cmp,
+                   'eval': monasca_eval}
+            properties['expression']['str_replace'] = str_replace_dict
+            ntf_name = ntf_name_dict[tpl_condition['comparison_operator']]
+            ntf_dict = {'get_resource': ntf_name}
+            properties['alarm_actions'] = [ntf_dict]
+            return ntf_name, properties
+        notification_name, mnc_alarm_resources['properties'] =\
+            _convert_to_heat_monasca_prop()
         # alarm url process here
         alarm_url = vnf['attributes'].get(trigger_name)
-        if alarm_url:
-            alarm_url = str(alarm_url)
-            LOG.debug('Alarm url in heat %s', alarm_url)
-            properties['alarm_actions'] = [alarm_url]
-        return properties
+
+        def _convert_to_heat_monasca_notification_resources(notification_url):
+            ntf_res = dict()
+            ntf_res['type'] = 'OS::Monasca::Notification'
+            ntf_prop = dict()
+            ntf_prop['type'] = 'webhook'
+            ntf_prop['address'] = notification_url
+            ntf_res['properties'] = ntf_prop
+            return ntf_res
+        alarm_url = str(alarm_url) if alarm_url else ''
+        LOG.debug('Alarm url in heat-monasca %s', alarm_url)
+        ntf_resources =\
+            _convert_to_heat_monasca_notification_resources(alarm_url)
+        monitoring_resources[trigger_name] = mnc_alarm_resources
+        monitoring_resources[notification_name] = ntf_resources
+        return monitoring_resources

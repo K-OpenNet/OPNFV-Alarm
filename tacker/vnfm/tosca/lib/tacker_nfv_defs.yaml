@@ -233,6 +233,11 @@ node_types:
       anti_spoofing_protection:
         type: boolean
         required: false
+      allowed_address_pairs:
+        type: list
+        entry_schema:
+          type: tosca.datatypes.tacker.VirtualIP
+        required: false
       security_groups:
         type: list
         required: false
@@ -257,3 +262,9 @@ node_types:
         required: true
         entry_schema:
           type: tosca.nfv.datatypes.pathType
+  tosca.nodes.nfv.VNFC.Tacker:
+    derived_from: tosca.nodes.SoftwareComponent
+    requirements:
+      - host:
+         node: tosca.nodes.nfv.VDU.Tacker
+         relationship: tosca.relationships.HostedOn

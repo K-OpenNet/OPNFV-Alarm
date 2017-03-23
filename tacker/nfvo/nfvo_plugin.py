@@ -18,12 +18,17 @@ import os
 import threading
 import time
 import uuid
+import yaml
 
 from cryptography import fernet
+import eventlet
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import strutils
+from six import iteritems
+from tempfile import mkstemp
+from toscaparser.tosca_template import ToscaTemplate
 
 from tacker._i18n import _
 from tacker.common import driver_manager
@@ -32,23 +37,29 @@ from tacker.common import log
 from tacker.common import utils
 from tacker import context as t_context
 from tacker.db.nfvo import nfvo_db
+from tacker.db.nfvo import ns_db
 from tacker.db.nfvo import vnffg_db
+from tacker.extensions import common_services as cs
 from tacker.extensions import nfvo
 from tacker import manager
 from tacker.plugins.common import constants
 from tacker.vnfm.tosca import utils as toscautils
+from tacker.vnfm import vim_client
 from toscaparser import tosca_template
 
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+MISTRAL_RETRIES = 30
+MISTRAL_RETRY_WAIT = 6
 
 
 def config_opts():
     return [('nfvo_vim', NfvoPlugin.OPTS)]
 
 
-class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
+class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin,
+        ns_db.NSPluginDb):
     """NFVO reference plugin for NFVO extension
 
     Implements the NFVO extension and defines public facing APIs for VIM
@@ -71,10 +82,12 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
 
     def __init__(self):
         super(NfvoPlugin, self).__init__()
+        self._pool = eventlet.GreenPool()
         self._vim_drivers = driver_manager.DriverManager(
             'tacker.nfvo.vim.drivers',
             cfg.CONF.nfvo_vim.vim_drivers)
         self._created_vims = dict()
+        self.vim_client = vim_client.VimClient()
         context = t_context.get_admin_context()
         vims = self.get_vims(context)
         for vim in vims:
@@ -87,6 +100,18 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
             time.sleep(self._monitor_interval)
             for created_vim in self._created_vims.values():
                 self.monitor_vim(created_vim)
+
+    def get_auth_dict(self, context):
+        auth = CONF.keystone_authtoken
+        return {
+            'auth_url': auth.auth_url + '/v3',
+            'token': context.auth_token,
+            'project_domain_name': auth.project_domain_name or context.domain,
+            'project_name': context.tenant_name
+        }
+
+    def spawn_n(self, function, *args, **kwargs):
+        self._pool.spawn_n(function, *args, **kwargs)
 
     @log.log
     def create_vim(self, context, vim):
@@ -213,6 +238,13 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
 
     @log.log
     def create_vnffg(self, context, vnffg):
+        vnffg_attributes = vnffg['vnffg']['attributes']
+        if vnffg_attributes.get('param_values'):
+            param = vnffg_attributes['param_values']
+            if isinstance(param, dict):
+                vnffg_attributes['param_values'] = yaml.safe_dump(param)
+            else:
+                raise exceptions.InvalidParam()
         vnffg_dict = super(NfvoPlugin, self)._create_vnffg_pre(context, vnffg)
         nfp = super(NfvoPlugin, self).get_nfp(context,
                                               vnffg_dict['forwarding_paths'])
@@ -358,13 +390,13 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         vnfm_plugin = manager.TackerManager.get_service_plugins()['VNFM']
         vim_id = vnfm_plugin.get_vnf(context, vnf_id, fields=['vim_id'])
         vim_obj = self.get_vim(context, vim_id['vim_id'], mask_password=False)
+        if vim_obj is None:
+            raise nfvo.VimFromVnfNotFoundException(vnf_id=vnf_id)
         vim_auth = vim_obj['auth_cred']
         vim_auth['password'] = self._decode_vim_auth(vim_obj['id'],
                                                      vim_auth['password'].
                                                      encode('utf-8'))
         vim_auth['auth_url'] = vim_obj['auth_url']
-        if vim_obj is None:
-            raise nfvo.VimFromVnfNotFoundException(vnf_id=vnf_id)
 
         return vim_obj
 
@@ -401,6 +433,303 @@ class NfvoPlugin(nfvo_db.NfvoPluginDb, vnffg_db.VnffgPluginDbMixin):
         driver_type = vim_obj['type']
         return self._vim_drivers.invoke(driver_type,
                                         'get_vim_resource_id',
-                                        vim_auth=vim_obj['auth_cred'],
+                                        vim_obj=vim_obj,
                                         resource_type=resource,
                                         resource_name=name)
+
+    @log.log
+    def create_nsd(self, context, nsd):
+        nsd_data = nsd['nsd']
+        template = nsd_data['attributes'].get('nsd')
+        if isinstance(template, dict):
+            nsd_data['attributes']['nsd'] = yaml.safe_dump(
+                template)
+        LOG.debug(_('nsd %s'), nsd_data)
+
+        name = nsd_data['name']
+        if self._get_by_name(context, ns_db.NSD, name):
+            raise exceptions.DuplicateResourceName(resource='NSD', name=name)
+
+        self._parse_template_input(context, nsd)
+        return super(NfvoPlugin, self).create_nsd(
+            context, nsd)
+
+    def _parse_template_input(self, context, nsd):
+        nsd_dict = nsd['nsd']
+        nsd_yaml = nsd_dict['attributes'].get('nsd')
+        inner_nsd_dict = yaml.safe_load(nsd_yaml)
+        nsd['vnfds'] = dict()
+        LOG.debug(_('nsd_dict: %s'), inner_nsd_dict)
+
+        vnfm_plugin = manager.TackerManager.get_service_plugins()['VNFM']
+        vnfd_imports = inner_nsd_dict['imports']
+        inner_nsd_dict['imports'] = []
+        new_files = []
+        for vnfd_name in vnfd_imports:
+            vnfd = vnfm_plugin.get_vnfd(context, vnfd_name)
+            # Copy VNF types and VNF names
+            sm_dict = yaml.safe_load(vnfd['attributes']['vnfd'])[
+                'topology_template'][
+                'substitution_mappings']
+            nsd['vnfds'][sm_dict['node_type']] = vnfd['name']
+            # Ugly Hack to validate the child templates
+            # TODO(tbh): add support in tosca-parser to pass child
+            # templates as dict
+            fd, temp_path = mkstemp()
+            with open(temp_path, 'w') as fp:
+                fp.write(vnfd['attributes']['vnfd'])
+            os.close(fd)
+            new_files.append(temp_path)
+            inner_nsd_dict['imports'].append(temp_path)
+        # Prepend the tacker_defs.yaml import file with the full
+        # path to the file
+        toscautils.updateimports(inner_nsd_dict)
+
+        try:
+            ToscaTemplate(a_file=False,
+                    yaml_dict_tpl=inner_nsd_dict)
+        except Exception as e:
+            LOG.exception(_("tosca-parser error: %s"), str(e))
+            raise nfvo.ToscaParserFailed(error_msg_details=str(e))
+        finally:
+            for file_path in new_files:
+                os.remove(file_path)
+            inner_nsd_dict['imports'] = vnfd_imports
+
+        if ('description' not in nsd_dict or
+                nsd_dict['description'] == ''):
+            nsd_dict['description'] = inner_nsd_dict.get(
+                'description', '')
+        if (('name' not in nsd_dict or
+                not len(nsd_dict['name'])) and
+                'metadata' in inner_nsd_dict):
+            nsd_dict['name'] = inner_nsd_dict['metadata'].get(
+                'template_name', '')
+
+        LOG.debug(_('nsd %s'), nsd)
+
+    def _get_vnfd_id(self, vnfd_name, onboarded_vnfds):
+        for vnfd in onboarded_vnfds:
+            if vnfd_name == vnfd['name']:
+                return vnfd['id']
+
+    @log.log
+    def create_ns(self, context, ns):
+        """Create NS and corresponding VNFs.
+
+        :param ns ns dict which contains nsd_id and attributes
+        This method has 3 steps:
+        step-1: substitute all get_input params to its corresponding values
+        step-2: Build params dict for substitution mappings case through which
+        VNFs will actually substitute their requirements.
+        step-3: Create mistral workflow and execute the workflow
+        """
+        nsd = self.get_nsd(context, ns['ns']['nsd_id'])
+        nsd_dict = yaml.safe_load(nsd['attributes']['nsd'])
+        vnfm_plugin = manager.TackerManager.get_service_plugins()['VNFM']
+        onboarded_vnfds = vnfm_plugin.get_vnfds(context, [])
+        region_name = ns.setdefault('placement_attr', {}).get(
+            'region_name', None)
+        vim_res = self.vim_client.get_vim(context, ns['ns']['vim_id'],
+                                          region_name)
+        driver_type = vim_res['vim_type']
+        if not ns['ns']['vim_id']:
+            ns['ns']['vim_id'] = vim_res['vim_id']
+        if self._get_by_name(context, ns_db.NS, ns['ns']['name']):
+            raise exceptions.DuplicateResourceName(resource='NS',
+                name=ns['ns']['name'])
+
+        # Step-1
+        param_values = ns['ns']['attributes'].get('param_values', {})
+        if 'get_input' in str(nsd_dict):
+            self._process_parameterized_input(ns['ns']['attributes'],
+                    nsd_dict)
+        # Step-2
+        vnfds = nsd['vnfds']
+        # vnfd_dict is used while generating workflow
+        vnfd_dict = dict()
+        for node_name, node_val in \
+                iteritems(nsd_dict['topology_template']['node_templates']):
+            if node_val.get('type') not in vnfds.keys():
+                continue
+            vnfd_name = vnfds[node_val.get('type')]
+            if not vnfd_dict.get(vnfd_name):
+                vnfd_dict[vnfd_name] = {
+                    'id': self._get_vnfd_id(vnfd_name, onboarded_vnfds),
+                    'instances': [node_name]
+                }
+            else:
+                vnfd_dict[vnfd_name]['instances'].append(node_name)
+            if not node_val.get('requirements'):
+                continue
+            if not param_values.get(vnfd_name):
+                param_values[vnfd_name] = {}
+            param_values[vnfd_name]['substitution_mappings'] = dict()
+            req_dict = dict()
+            requirements = node_val.get('requirements')
+            for requirement in requirements:
+                req_name = list(requirement.keys())[0]
+                req_val = list(requirement.values())[0]
+                res_name = req_val + ns['ns']['nsd_id'][:11]
+                req_dict[req_name] = res_name
+                if req_val in nsd_dict['topology_template']['node_templates']:
+                    param_values[vnfd_name]['substitution_mappings'][
+                        res_name] = nsd_dict['topology_template'][
+                            'node_templates'][req_val]
+
+            param_values[vnfd_name]['substitution_mappings'][
+                'requirements'] = req_dict
+        ns['vnfd_details'] = vnfd_dict
+        # Step-3
+        kwargs = {'ns': ns, 'params': param_values}
+        workflow = self._vim_drivers.invoke(driver_type,
+                                         'prepare_and_create_workflow',
+                                         resource='vnf',
+                                         action='create',
+                                         auth_dict=self.get_auth_dict(context),
+                                         kwargs=kwargs)
+        try:
+            mistral_execution = self._vim_drivers.invoke(
+                driver_type,
+                'execute_workflow',
+                workflow=workflow,
+                auth_dict=self.get_auth_dict(context))
+        except Exception as ex:
+            LOG.error(_('Error while executing workflow: %s'), ex)
+            self._vim_drivers.invoke(driver_type,
+                                     'delete_workflow',
+                                     workflow_id=workflow['id'],
+                                     auth_dict=self.get_auth_dict(context))
+            raise ex
+        ns_dict = super(NfvoPlugin, self).create_ns(context, ns)
+
+        def _create_ns_wait(self_obj, ns_id, execution_id):
+            exec_state = "RUNNING"
+            mistral_retries = MISTRAL_RETRIES
+            while exec_state == "RUNNING" and mistral_retries > 0:
+                time.sleep(MISTRAL_RETRY_WAIT)
+                exec_state = self._vim_drivers.invoke(
+                    driver_type,
+                    'get_execution',
+                    execution_id=execution_id,
+                    auth_dict=self.get_auth_dict(context)).state
+                LOG.debug(_('status: %s'), exec_state)
+                if exec_state == 'SUCCESS' or exec_state == 'ERROR':
+                    break
+                mistral_retries = mistral_retries - 1
+            error_reason = None
+            if mistral_retries == 0 and exec_state == 'RUNNING':
+                error_reason = _("NS creation is not completed within"
+                               " {wait} seconds as creation of mistral"
+                               " exection {mistral} is not completed").format(
+                                   wait=MISTRAL_RETRIES * MISTRAL_RETRY_WAIT,
+                                   mistral=execution_id)
+            exec_obj = self._vim_drivers.invoke(driver_type,
+                'get_execution',
+                execution_id=execution_id,
+                auth_dict=self.get_auth_dict(context))
+            self._vim_drivers.invoke(driver_type,
+                'delete_execution',
+                execution_id=execution_id,
+                auth_dict=self.get_auth_dict(context))
+            self._vim_drivers.invoke(driver_type,
+                'delete_workflow',
+                workflow_id=workflow['id'],
+                auth_dict=self.get_auth_dict(context))
+            super(NfvoPlugin, self).create_ns_post(context, ns_id, exec_obj,
+                    vnfd_dict, error_reason)
+
+        self.spawn_n(_create_ns_wait, self, ns_dict['id'],
+                mistral_execution.id)
+        return ns_dict
+
+    @log.log
+    def _update_params(self, original, paramvalues):
+        for key, value in iteritems(original):
+            if not isinstance(value, dict) or 'get_input' not in str(value):
+                pass
+            elif isinstance(value, dict):
+                if 'get_input' in value:
+                    if value['get_input'] in paramvalues:
+                        original[key] = paramvalues[value['get_input']]
+                    else:
+                        LOG.debug('Key missing Value: %s', key)
+                        raise cs.InputValuesMissing(key=key)
+                else:
+                    self._update_params(value, paramvalues)
+
+    @log.log
+    def _process_parameterized_input(self, attrs, nsd_dict):
+        param_vattrs_dict = attrs.pop('param_values', None)
+        if param_vattrs_dict:
+            for node in \
+                    nsd_dict['topology_template']['node_templates'].values():
+                if 'get_input' in str(node):
+                    self._update_params(node, param_vattrs_dict['nsd'])
+        else:
+            raise cs.ParamYAMLInputMissing()
+
+    @log.log
+    def delete_ns(self, context, ns_id):
+        ns = super(NfvoPlugin, self).get_ns(context, ns_id)
+        vim_res = self.vim_client.get_vim(context, ns['vim_id'])
+        driver_type = vim_res['vim_type']
+        workflow = self._vim_drivers.invoke(driver_type,
+            'prepare_and_create_workflow',
+            resource='vnf',
+            action='delete',
+            auth_dict=self.get_auth_dict(context),
+            kwargs={'ns': ns})
+        try:
+            mistral_execution = self._vim_drivers.invoke(
+                driver_type,
+                'execute_workflow',
+                workflow=workflow,
+                auth_dict=self.get_auth_dict(context))
+        except Exception as ex:
+            LOG.error(_('Error while executing workflow: %s'), ex)
+            self._vim_drivers.invoke(driver_type,
+                'delete_workflow',
+                workflow_id=workflow['id'],
+                auth_dict=self.get_auth_dict(context))
+
+            raise ex
+        super(NfvoPlugin, self).delete_ns(context, ns_id)
+
+        def _delete_ns_wait(ns_id, execution_id):
+            exec_state = "RUNNING"
+            mistral_retries = MISTRAL_RETRIES
+            while exec_state == "RUNNING" and mistral_retries > 0:
+                time.sleep(MISTRAL_RETRY_WAIT)
+                exec_state = self._vim_drivers.invoke(
+                    driver_type,
+                    'get_execution',
+                    execution_id=execution_id,
+                    auth_dict=self.get_auth_dict(context)).state
+                LOG.debug(_('status: %s'), exec_state)
+                if exec_state == 'SUCCESS' or exec_state == 'ERROR':
+                    break
+                mistral_retries -= 1
+            error_reason = None
+            if mistral_retries == 0 and exec_state == 'RUNNING':
+                error_reason = _("NS deletion is not completed within"
+                               " {wait} seconds as deletion of mistral"
+                               " exection {mistral} is not completed").format(
+                                   wait=MISTRAL_RETRIES * MISTRAL_RETRY_WAIT,
+                                   mistral=execution_id)
+            exec_obj = self._vim_drivers.invoke(driver_type,
+                'get_execution',
+                execution_id=execution_id,
+                auth_dict=self.get_auth_dict(context))
+            self._vim_drivers.invoke(driver_type,
+                'delete_execution',
+                execution_id=execution_id,
+                auth_dict=self.get_auth_dict(context))
+            self._vim_drivers.invoke(driver_type,
+                'delete_workflow',
+                workflow_id=workflow['id'],
+                auth_dict=self.get_auth_dict(context))
+            super(NfvoPlugin, self).delete_ns_post(context, ns_id, exec_obj,
+                    error_reason)
+        self.spawn_n(_delete_ns_wait, ns['id'], mistral_execution.id)
+        return ns['id']

@@ -48,7 +48,7 @@ class VNFInUse(exceptions.InUse):
 
 
 class InvalidInfraDriver(exceptions.InvalidInput):
-    message = _('VIM type %(vim_name)s is not supported as a infra driver ')
+    message = _('VIM type %(vim_name)s is not supported as an infra driver ')
 
 
 class InvalidServiceType(exceptions.InvalidInput):
@@ -95,14 +95,6 @@ class HeatTranslatorFailed(exceptions.InvalidInput):
     message = _("heat-translator failed: - %(error_msg_details)s")
 
 
-class InputValuesMissing(exceptions.InvalidInput):
-    message = _("Parameter input values missing for the key '%(key)s'")
-
-
-class ParamYAMLInputMissing(exceptions.InvalidInput):
-    message = _("Parameter YAML input missing")
-
-
 class HeatClientException(exceptions.TackerException):
     message = _("%(msg)s")
 
@@ -147,6 +139,21 @@ class VNFInactive(exceptions.InvalidInput):
 
 class MetadataNotMatched(exceptions.InvalidInput):
     message = _("Metadata for alarm policy is not matched")
+
+
+class InvalidSubstitutionMapping(exceptions.InvalidInput):
+    message = _("Input for substitution mapping requirements are not"
+                " valid for %(requirement)s. They must be in the form"
+                " of list with two entries")
+
+
+class SMRequirementMissing(exceptions.InvalidInput):
+    message = _("All the requirements for substitution_mappings are not"
+                " provided. Missing requirement for %(requirement)s")
+
+
+class InvalidParamsForSM(exceptions.InvalidInput):
+    message = _("Please provide parameters for substitution mappings")
 
 
 def _validate_service_type_list(data, valid_values=None):
@@ -229,6 +236,12 @@ RESOURCE_ATTRIBUTE_MAP = {
             'allow_put': False,
             'is_visible': True,
         },
+        'template_source': {
+            'allow_post': False,
+            'allow_put': False,
+            'is_visible': True,
+            'default': 'onboarded'
+        },
     },
 
     'vnfs': {
@@ -251,6 +264,7 @@ RESOURCE_ATTRIBUTE_MAP = {
             'allow_put': False,
             'validate': {'type:uuid': None},
             'is_visible': True,
+            'default': None
         },
         'vim_id': {
             'allow_post': True,
@@ -317,6 +331,13 @@ RESOURCE_ATTRIBUTE_MAP = {
             'allow_post': False,
             'allow_put': False,
             'is_visible': True,
+        },
+        'vnfd_template': {
+            'allow_post': True,
+            'allow_put': False,
+            'validate': {'type:dict_or_none': None},
+            'is_visible': True,
+            'default': None,
         },
     },
 }
