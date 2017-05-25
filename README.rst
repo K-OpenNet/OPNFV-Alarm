@@ -4,6 +4,7 @@ Welcome!
 Authors:
 ========
 Tung Doan
+OpenStack Tacker contributor
 
 Email: doantungbk.203@gmail.com
 
